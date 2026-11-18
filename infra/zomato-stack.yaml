@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Short-lived Zomato demo: ALB, EC2 ASG, CloudWatch scaling, two public AZs. Charges apply.'
+Parameters:
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+    - t3.micro
+    - t2.micro
+  MaxCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 2
+  OperatorCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Restrict to your public IPv4 /32 for private demo; 0.0.0.0/0 allows public HTTP access.
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+  IGW:
+    Type: AWS::EC2::InternetGateway
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC
+      InternetGatewayId:
+        Ref: IGW
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.42.1.0/24
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs: ''
+      MapPublicIpOnLaunch: true
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.42.2.0/24
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs: ''
+      MapPublicIpOnLaunch: true
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: IGW
+  AssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: SubnetA
+      RouteTableId:
+        Ref: RouteTable
+  AssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: SubnetB
+      RouteTableId:
+        Ref: RouteTable
+  AlbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow demo HTTP to ALB
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp:
+          Ref: OperatorCidr
+  AppSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Only ALB to demo instances
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 8080
+        ToPort: 8080
+        SourceSecurityGroupId:
+          Ref: AlbSG
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+      - Ref: SubnetA
+      - Ref: SubnetB
+      SecurityGroups:
+      - Ref: AlbSG
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+        Ref: VPC
+      Port: 8080
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn:
+        Ref: ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: TargetGroup
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId:
+          Ref: LatestAmiId
+        InstanceType:
+          Ref: InstanceType
+        SecurityGroupIds:
+        - Ref: AppSG
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        UserData:
+          Fn::Base64:
+            Fn::Sub: '#!/bin/bash
+
+              set -euxo pipefail
+
+              mkdir -p /opt/zomato
+
+              printf ''%s'' ''H4sIAGwg/WoC/+1Z/W4buRH3334KnnzB7l6llbSWZVtfaD6MS1pfbNhuD2gQ6KhdSuJld7klubYUnYCiz9B3KfpvH+WepDPkSlr5I01aXFrkTAGW+PXjzHBmODP26379t+d09pLRiMmdX6Q1bHvou9HYb21+43izETSDHTLb+QwtV5pKOH7n19mCI5JonrB+8/C4dXy4f3B85DcO9ptHQWt357F98U0xec2kn81/wTPQqNutVtnum4cHzVW/3dpv7DQPgsPDoHnY3m+D/Qftg8YOaXxO+5dC6A+tE5QP1ZRKFn1R91+pVE6iPKSai5TGVRKxjKURS8N5bSwZI2MhIhiMOWjJHH4kwievBcnoPGGpVkRIkoMOkYhq6gPY7liKhEy1znyrWoQnmZCaXE0lPDE8nby8ujq/NFNV8owqhv0L9uecKf2SplHMpMXIZRzzkZ9RqdgKBMZMf7fo/6hEWiVCVQn6sCpRInzHNPRWh1mojOopYK1QzqG7u3txdnZF+qbjDodjHrPh0PMlUyK+Zq6HBwOHuxcn3746ew0LhfInTLP02nWefn85tONOlTixCGnseLDy8urpHy6evr66hOVvdgm0hcMjp0OasCylCYOfzmXGQ0aeiZsYN0dcTXH0nKYMhHVRnssk9HD34fGyWoYLSnDn/P17Sp4LmTJZBvyOysmUSa4pMUvKgEFwC3C/BPhCKEpeCrjVbThFY0pwcos0g/R29+zixcmFYfstIXvknMkaT8GyUmBHpPG8Q1KhibUf1Jkol3QUM0JDKZQikmUxD6nyd0/Pnv8eYNYX6J/ClbrebhhTWFcoiHu/3ngdw1PExgCoMpFGrmLxuEpCEYFyjEQ0x98pXKIe6nnG+g7NzMGo/XVUJqfAwAY6HgsaATU440d5kikXQTwf7AMgXY/wsWGMqxW3rj1lNNdMeYTFoLs4sgZFgsAy0mhoSVTMRSjvngVTE5K5znNLce0KKHa2GfiYbacsnegpbFRaujFL3YIvz/vgbhpOWQ0xpDDKmIqa0kIy59auzSbl3pq6QaPyb0AH2frQ9Q1FYvjtyZW5oJLMpcg1A4mvDN3M+2i/nvm7XgiCL9b2iVN3NggGhelcppaIlSYEjUaVuMbo68Th4ONm/lQnYLg+qtrQ3JjrAaeazXQdp7oknCIRup/rce2oxPn26cB+DBL+SBoWDmiKzpXTccQ7Z/kQKM14HfZpCpYCjvbj0bc2kZJT+uBRPB2LTzljAhZj4NELVlGgVv9hzDphdJZToTS6FSNW1B46gQWwtpbAQ1K8Jx8WQZjlt8jaIy/gORoxSTWL52BdOdxlRG6EfAevlTT2ATobw5gCxww+hLBZBp7QPFj+FhYoLzobmPITAYYsUh6CVf+GNPxmsLVyBuuaWyM3U9Duu3t7CLpN8Wq/OyPfkGa73ToIDuCMZqO5f9xoBcG+R56QVgDxd/swOG5/shqFIslieJoitNNrGucg5FlJqvdhtBotxGBSCgkQ6MTGKMnVbRQmen52ecdG4ZIeMk/y1erehESP8BEa9e8IwablfBsoNj4NRMpTbWkoXBBq3V3X5zSckrMreCgweqSJD1LRG8CtBK2713c/5Y0y5TwF0fMIlpo3iSj+npWZMFKFKGn1nqA7VJZ4aRwluiHX0nGbWs2SIUdVNWGW4XFj5jDj3OEOXwe32AfPlLLPVKqR1xWcHSJv5BuMAt4a65E4UnIab/9LWZSJvCWMGw4Cx/f+7hFGeyzH+GLZ6ALtsnlnqZ3z4SEHu3NtPLPaDuawTUGnYP0WJfcbWRM5WkFtgSZMKevKXoADs9SSLKYh+BwXpQruRnGFOuiVuWazkGWauH9EGz1BWVUJvurFT6MWv7s8e/2CYUxgRr2PsaB7ZY9AZWuOxWRYEF6EReMEQuVvIE5U5ahHok05TxR5ohzwS1ZDaRTBcWoIMQQ4VPTnsBlmzWboxLma9q9kDhEJKN9wiF5/ODRufDhMKE+Hw8IXmAjcGm4poj4/u7gCOz1qHK1N1RIydk6NINGNi5QscPuyS+wD1F/Y92fpbJOA2+/JN1zXafjm41QRBwhfRY42WRmCBTBc6P1qah/+/0X9b/9u/a/5WP/7LPW/w/vqf8Fx0H4s//0a2iYR+p/V/1qgb7frf/D9WP/7HK33VSRCDBYJ6sCgh39JTNNJv8LSCvThXRj0EgZx6yoZrphsuFKM4kvfr1xzdoNPamVVnuhXbnikp/2IXfOQ1UynylOuOY1rmJeBxwEIzXXMBn8SCdWCPI9FHpFTOurV7XhP6Tl8YQFlMQbc2pgmPJ531BxCgqSW8+pTCXjdBMIQnnYa3REN300kpg+dvTHFTzcUsZCdvSAIlhiHLBI6s9R0DoNGNlvtbcNvQnMtuhnEOhA2dIJWNltOm4sCgAX7h63WMlv12+320g+pjBalQyEn1Kw7MgFhpwmISmAotscO8FNM1CTEJbnqNAM4fnVa82hDC06QRjfiCmLKeWccs1kXQrpJWsPwVXVCkC+T3R9Bdfl4Xisk3lEZBKC1EdM3jKXdCc0M0HKUa8hNy1QWvKzobBQyssSvCUKBNEEGt6hGOsNcKtiQCY6ELFVC47gslz2bmi4SyPSnjE+muhMcACm9ur3QXt2qFV4sqBFcCyha8x41gMFeNvgO9AaOIGxTqDZ16ZohDCNDrCOQf/6dPP3+8p6kv1fPQJWQSMKjfgVLHZXBqTDRYRFJ+r4PxOESoCQYXGxqKEBEALtZiAeb/aUCyxrG7reLgGSzzgqhQqQAZV/1BhtiBpvkQUEgzQhcLtgQlXMCUSkx1Tb4YpBp21IHnM9oOCWrWku5Eo95HQS88bpWv+GnbgWsQskzPaBqnoZknKeWIcxCXW8BGTZcIOBCNljlb/v0hnJNzqVIuGI+wLhvxkyHU/duYcqrlmdMHcl763UtGuarBZj0Mb+B1AGXFGO8GOuCE8qRDUwITmKGP5/NX0WuY/F8rMkVWX3/hwtzZR3y9QJnfXuDS7z/V4Vk1nMrUS1/KAhCN99/8LQtvrq41sfSNNjV8ymPIQVCWiFJcC3YjIixTclLG71CkBG/3hwUwt1oVpzlOjAH+PDXN3Xt1+hDHXQmTkFmTEcsfnA7WHoK+82ibdF8vZj56JGX5Oe//I1gDwv4RjY///Uf2DeV+7U4Rg+eYd0GnDLaOsE5Q311YFSkYczDd33X6w+MErszn0eWqyIbNwRWR4Uki0GY95ZLMGTQGeYtHryLory1fffOM3BjWLXLU3pNeYz/RHCWy1tKbckBYkp6LQuVKytrUaSqLhKsVUYdB8tdTrWoJXUW26X3zt3/Fiyr6MI6mGr7NjUGh+wutooOHSw3LNcGccsaup/Gf+QXKfxPP0W+yfj/Y0kW/zshYxAji0CI1hV0wW9YT9GrW/9sauGDx3TgsT22x/bYvqj2L1Gc0gkAKAAA'' | base64 -d | tar -xz -C /opt/zomato
+
+              cat > /etc/systemd/system/zomato.service <<''EOF''
+
+              [Unit]
+
+              Description=Zomato educational demo
+
+              After=network.target
+
+              [Service]
+
+              Environment=PORT=8080
+
+              Environment=AWS_REGION=${AWS::Region}
+
+              ExecStart=/usr/bin/python3 /opt/zomato/server.py
+
+              Restart=always
+
+              RestartSec=3
+
+              User=ec2-user
+
+              [Install]
+
+              WantedBy=multi-user.target
+
+              EOF
+
+              systemctl daemon-reload
+
+              systemctl enable --now zomato.service
+
+              '
+  ASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Ref: SubnetA
+      - Ref: SubnetB
+      MinSize: '1'
+      MaxSize:
+        Ref: MaxCapacity
+      DesiredCapacity: '1'
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      TargetGroupARNs:
+      - Ref: TargetGroup
+      LaunchTemplate:
+        LaunchTemplateId:
+          Ref: LaunchTemplate
+        Version:
+          Fn::GetAtt:
+          - LaunchTemplate
+          - LatestVersionNumber
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName:
+        Ref: ASG
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 120
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 35.0
+Outputs:
+  LoadBalancerURL:
+    Value:
+      Fn::Sub: http://${ALB.DNSName}
+  AutoScalingGroupName:
+    Value:
+      Ref: ASG
+  TargetGroupArn:
+    Value:
+      Ref: TargetGroup

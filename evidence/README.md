@@ -1,0 +1,1 @@
+Store dated screenshots of CloudFormation stack, ALB target health, ASG activity, CloudWatch metrics, AWS billing, and actual CSV measurements here. Never fabricate results or publish account IDs, credentials, or personal information.

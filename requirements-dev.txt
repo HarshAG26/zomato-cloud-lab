@@ -1,0 +1,4 @@
+# Optional tooling: required only to regenerate the CloudFormation YAML
+# and create a chart from measured load-test CSV results.
+PyYAML>=6.0,<7.0
+matplotlib>=3.8,<4.0
